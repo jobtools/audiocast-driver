@@ -1,0 +1,147 @@
+#!/bin/bash
+# Build the AudioCast driver, publish to GitHub Releases, refresh Homebrew cask.
+# REPO/CASK_REPO env can override the targets.
+set -euo pipefail
+
+PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
+INSTALLER_DIR="${PROJECT_ROOT}/Installer"
+VERSION_FILE="${PROJECT_ROOT}/VERSION"
+
+REPO="${REPO:-jobtools/audiocast-driver}"
+CASK_REPO="${CASK_REPO:-jobtools/homebrew-audiocast}"
+CASK_SLUG="audiocast-driver"
+
+# --- Bump version (last segment +1) ------------------------------------------
+CURRENT="$(cat "${VERSION_FILE}")"
+IFS='.' read -ra PARTS <<< "${CURRENT}"
+LAST_IDX=$((${#PARTS[@]} - 1))
+PARTS[${LAST_IDX}]=$((${PARTS[${LAST_IDX}]} + 1))
+NEW_VERSION="$(IFS='.'; echo "${PARTS[*]}")"
+echo "${NEW_VERSION}" > "${VERSION_FILE}"
+
+VERSION="${NEW_VERSION}"
+TAG="v${VERSION}"
+PKG_NAME="AudioCast-${VERSION}.pkg"
+PKG_PATH="${INSTALLER_DIR}/${PKG_NAME}"
+
+echo ">> Bumped: ${CURRENT} → ${NEW_VERSION}"
+
+# Commit the bump
+git -C "${PROJECT_ROOT}" add "${VERSION_FILE}"
+if ! git -C "${PROJECT_ROOT}" diff --cached --quiet; then
+    GIT_NAME="$(git -C "${PROJECT_ROOT}" config user.name)"
+    GIT_EMAIL="$(git -C "${PROJECT_ROOT}" config user.email)"
+    git -C "${PROJECT_ROOT}" \
+        -c user.name="${GIT_NAME}" -c user.email="${GIT_EMAIL}" \
+        commit -q -m "Bump driver to v${VERSION}"
+fi
+
+echo ">> Release repo: https://github.com/${REPO}"
+echo ">> Cask repo:    https://github.com/${CASK_REPO}"
+echo ">> Cask file:    https://github.com/${CASK_REPO}/blob/main/Casks/${CASK_SLUG}.rb"
+echo ">> Version:      ${VERSION}"
+echo ">> Tag:          ${TAG}"
+echo ""
+
+# --- Build .pkg ---------------------------------------------------------------
+( cd "${PROJECT_ROOT}" && bash Installer/build_audiocast.sh )
+if [[ ! -f "${PKG_PATH}" ]]; then
+    echo "Build did not produce ${PKG_PATH}" >&2
+    exit 1
+fi
+
+PKG_SHA="$(shasum -a 256 "${PKG_PATH}" | awk '{print $1}')"
+echo ">> SHA-256: ${PKG_SHA}"
+
+# --- Push commits + tag to driver repo ---------------------------------------
+git -C "${PROJECT_ROOT}" push origin "$(git -C "${PROJECT_ROOT}" rev-parse --abbrev-ref HEAD)" 2>/dev/null || true
+
+# --- GitHub Release ----------------------------------------------------------
+RELEASE_NOTES="AudioCast virtual audio driver ${VERSION}.
+
+Single-variant (2 channels) fork of BlackHole, branded as 'AudioCast' in
+System Settings → Sound. Bundle ID: com.audiocast.driver.
+
+Install via Homebrew:
+
+    brew tap jobtools/audiocast
+    brew install --cask audiocast-driver
+
+Or download the .pkg directly and double-click."
+
+if gh release view "${TAG}" --repo "${REPO}" >/dev/null 2>&1; then
+    echo ">> Updating release ${TAG}"
+    gh release upload "${TAG}" "${PKG_PATH}" --repo "${REPO}" --clobber
+    gh release edit "${TAG}" --repo "${REPO}" --draft=false >/dev/null
+else
+    echo ">> Creating release ${TAG}"
+    gh release create "${TAG}" \
+        --repo "${REPO}" \
+        --title "AudioCast Driver ${VERSION}" \
+        --notes "${RELEASE_NOTES}" \
+        "${PKG_PATH}"
+fi
+
+# --- Refresh Homebrew cask ---------------------------------------------------
+CASK_DIR="$(mktemp -d -t audiocast-driver-cask.XXXXXX)"
+trap 'rm -rf "${CASK_DIR}"' EXIT
+
+echo ">> Refreshing cask in ${CASK_REPO}"
+git clone --quiet "git@github.com:${CASK_REPO}.git" "${CASK_DIR}" 2>/dev/null || {
+    mkdir -p "${CASK_DIR}"
+    cd "${CASK_DIR}"
+    git init -q -b main
+    git remote add origin "git@github.com:${CASK_REPO}.git"
+}
+cd "${CASK_DIR}"
+mkdir -p Casks
+cat > "Casks/${CASK_SLUG}.rb" <<EOF
+cask "${CASK_SLUG}" do
+  version "${VERSION}"
+  sha256 "${PKG_SHA}"
+
+  url "https://github.com/${REPO}/releases/download/v#{version}/AudioCast-#{version}.pkg"
+  name "AudioCast Driver"
+  desc "Virtual audio device for AudioCast (BlackHole fork with AudioCast branding)"
+  homepage "https://github.com/${REPO}"
+
+  depends_on macos: ">= :sonoma"
+
+  pkg "AudioCast-#{version}.pkg"
+
+  uninstall pkgutil: "com.audiocast.driver"
+
+  caveats <<~CAVEATS
+    AudioCast Driver is self-signed (not Apple-notarized).
+
+    After install, restart your Mac or run:
+        sudo killall coreaudiod
+
+    Then check System Settings → Sound — you should see 'AudioCast' as
+    an output device.
+  CAVEATS
+
+  zap trash: [
+    "/Library/Audio/Plug-Ins/HAL/AudioCast.driver",
+  ]
+end
+EOF
+
+GIT_NAME="$(git -C "${PROJECT_ROOT}" config user.name)"
+GIT_EMAIL="$(git -C "${PROJECT_ROOT}" config user.email)"
+
+git add "Casks/${CASK_SLUG}.rb"
+if git diff --cached --quiet; then
+    echo ">> Cask unchanged"
+else
+    git -c user.name="${GIT_NAME}" -c user.email="${GIT_EMAIL}" \
+        commit -q -m "${CASK_SLUG} ${VERSION}"
+    git push -u origin main 2>/dev/null || git push origin main
+    echo ">> Cask published to ${CASK_REPO}"
+fi
+
+echo ""
+echo ">> Done."
+echo ">> Release:  https://github.com/${REPO}/releases/tag/${TAG}"
+echo ">> Cask:     https://github.com/${CASK_REPO}/blob/main/Casks/${CASK_SLUG}.rb"
+echo ">> Install:  brew tap jobtools/audiocast && brew install --cask audiocast-driver"
