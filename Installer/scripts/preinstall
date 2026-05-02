@@ -1,4 +1,4 @@
 #!/bin/sh
-
-sudo mkdir -p /Library/Audio/Plug-Ins/HAL
-sudo chown root:wheel /Library/Audio/Plug-Ins/HAL
+mkdir -p /Library/Audio/Plug-Ins/HAL
+chown root:wheel /Library/Audio/Plug-Ins/HAL
+exit 0
