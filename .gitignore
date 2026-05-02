@@ -1,3 +1,6 @@
-xcuserdata/
+build/
+Installer/root/
+Installer/*.pkg
+Installer/distribution.xml
+*.dSYM
 .DS_Store
-*.pkg
