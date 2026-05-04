@@ -256,13 +256,6 @@ static AudioServerPlugInHostRef     gPlugIn_Host                        = NULL;
 
 static CFStringRef                  gBox_Name                           = NULL;
 
-/// Runtime-mutable display name for kObjectID_Device. Hosts can write it via
-/// AudioObjectSetPropertyData(kAudioObjectPropertyName) so the macOS Sound
-/// settings, volume menu, etc. show e.g. "AudioCast (Pixel8a)" while
-/// connected, "AudioCast (Not Connected)" while idle.
-/// Protected by gPlugIn_StateMutex.
-static CFStringRef                  gDevice_DynamicName                 = NULL;
-
 #ifndef kBox_Aquired
 #define                             kBox_Aquired                 	true
 #endif
@@ -2239,6 +2232,7 @@ static OSStatus	BlackHole_IsDevicePropertySettable(AudioServerPlugInDriverRef in
 		case kAudioObjectPropertyBaseClass:
 		case kAudioObjectPropertyClass:
 		case kAudioObjectPropertyOwner:
+		case kAudioObjectPropertyName:
 		case kAudioObjectPropertyManufacturer:
 		case kAudioObjectPropertyOwnedObjects:
 		case kAudioDevicePropertyDeviceUID:
@@ -2261,12 +2255,6 @@ static OSStatus	BlackHole_IsDevicePropertySettable(AudioServerPlugInDriverRef in
 		case kAudioDevicePropertyZeroTimeStampPeriod:
 		case kAudioDevicePropertyIcon:
 			*outIsSettable = false;
-			break;
-
-		case kAudioObjectPropertyName:
-			//	Only kObjectID_Device supports dynamic naming. Device2 keeps
-			//	its hard-coded mirror name.
-			*outIsSettable = (inObjectID == kObjectID_Device);
 			break;
 
 		case kAudioDevicePropertyNominalSampleRate:
@@ -2465,22 +2453,9 @@ static OSStatus	BlackHole_GetDevicePropertyData(AudioServerPlugInDriverRef inDri
 
             switch (inObjectID) {
                 case kObjectID_Device:
-                {
-                    //	Always return the runtime-mutable name. If the host
-                    //	hasn't pushed a suffix yet, default to "Not Connected".
-                    pthread_mutex_lock(&gPlugIn_StateMutex);
-                    CFStringRef dyn = gDevice_DynamicName;
-                    if (dyn != NULL) {
-                        CFRetain(dyn);
-                    }
-                    pthread_mutex_unlock(&gPlugIn_StateMutex);
-                    if (dyn == NULL) {
-                        dyn = CFStringCreateWithCString(NULL, "AudioCast (Not Connected)", kCFStringEncodingUTF8);
-                    }
-                    *((CFStringRef*)outData) = dyn;
+                    *((CFStringRef*)outData) = get_device_name();
                     *outDataSize = sizeof(CFStringRef);
                     break;
-                }
 
                 case kObjectID_Device2:
                     *((CFStringRef*)outData) = get_device2_name();
@@ -2899,37 +2874,6 @@ static OSStatus	BlackHole_SetDevicePropertyData(AudioServerPlugInDriverRef inDri
 	//	property in the BlackHole_GetDevicePropertyData() method.
 	switch(inAddress->mSelector)
 	{
-		case kAudioObjectPropertyName:
-			//	Host writes the suffix only (e.g. "Pixel8a"). Driver pins the
-			//	"AudioCast" prefix so the device is always recognizable as
-			//	ours. Empty / NULL suffix → "(Not Connected)".
-			//	Only the main device supports this — not Device2.
-			FailWithAction(inObjectID != kObjectID_Device, theAnswer = kAudioHardwareIllegalOperationError, Done, "BlackHole_SetDevicePropertyData: kAudioObjectPropertyName only settable on kObjectID_Device");
-			FailWithAction(inData == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "BlackHole_SetDevicePropertyData: NULL data for kAudioObjectPropertyName");
-			FailWithAction(inDataSize != sizeof(CFStringRef), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_SetDevicePropertyData: wrong size for the data for kAudioObjectPropertyName");
-			{
-				CFStringRef suffix = *(const CFStringRef*)inData;
-				CFStringRef composed = NULL;
-				if (suffix != NULL && CFStringGetLength(suffix) > 0) {
-					composed = CFStringCreateWithFormat(NULL, NULL, CFSTR("AudioCast (%@)"), suffix);
-				} else {
-					composed = CFStringCreateWithCString(NULL, "AudioCast (Not Connected)", kCFStringEncodingUTF8);
-				}
-
-				pthread_mutex_lock(&gPlugIn_StateMutex);
-				if (gDevice_DynamicName != NULL) {
-					CFRelease(gDevice_DynamicName);
-				}
-				gDevice_DynamicName = composed;
-				pthread_mutex_unlock(&gPlugIn_StateMutex);
-
-				*outNumberPropertiesChanged = 1;
-				outChangedAddresses[0].mSelector = kAudioObjectPropertyName;
-				outChangedAddresses[0].mScope = kAudioObjectPropertyScopeGlobal;
-				outChangedAddresses[0].mElement = kAudioObjectPropertyElementMain;
-			}
-			break;
-
 		case kAudioDevicePropertyNominalSampleRate:
 			//	Changing the sample rate needs to be handled via the
 			//	RequestConfigChange/PerformConfigChange machinery.
