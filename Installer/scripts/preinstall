@@ -1,4 +1,10 @@
 #!/bin/sh
+# Free coreaudiod's mmap on the existing .driver bundle BEFORE the installer
+# tries to replace files. Without this, atomic file replacement of an in-use
+# HAL plug-in silently fails on macOS — installer reports success but the old
+# binary stays on disk. coreaudiod respawns immediately, mapping the new
+# bundle that postinstall finalizes.
+killall coreaudiod 2>/dev/null
 mkdir -p /Library/Audio/Plug-Ins/HAL
 chown root:wheel /Library/Audio/Plug-Ins/HAL
 exit 0

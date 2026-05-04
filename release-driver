@@ -69,9 +69,16 @@ Install via Homebrew:
 
 Or download the .pkg directly and double-click."
 
+### Versionless alias so the AudioCast app can hit a stable URL
+### (https://github.com/<repo>/releases/latest/download/AudioCast.pkg)
+### and always pick the latest, regardless of which version it was
+### compiled against. cask still uses the versioned filename.
+ALIAS_PATH="${INSTALLER_DIR}/AudioCast.pkg"
+cp "${PKG_PATH}" "${ALIAS_PATH}"
+
 if gh release view "${TAG}" --repo "${REPO}" >/dev/null 2>&1; then
     echo ">> Updating release ${TAG}"
-    gh release upload "${TAG}" "${PKG_PATH}" --repo "${REPO}" --clobber
+    gh release upload "${TAG}" "${PKG_PATH}" "${ALIAS_PATH}" --repo "${REPO}" --clobber
     gh release edit "${TAG}" --repo "${REPO}" --draft=false >/dev/null
 else
     echo ">> Creating release ${TAG}"
@@ -79,8 +86,9 @@ else
         --repo "${REPO}" \
         --title "AudioCast Driver ${VERSION}" \
         --notes "${RELEASE_NOTES}" \
-        "${PKG_PATH}"
+        "${PKG_PATH}" "${ALIAS_PATH}"
 fi
+rm -f "${ALIAS_PATH}"
 
 # --- Refresh Homebrew cask ---------------------------------------------------
 CASK_DIR="$(mktemp -d -t audiocast-driver-cask.XXXXXX)"
