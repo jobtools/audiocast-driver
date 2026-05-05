@@ -64,7 +64,7 @@ System Settings → Sound. Bundle ID: com.audiocast.driver.
 
 Install via Homebrew:
 
-    brew tap jobtools/audiocast
+    brew tap jobtools/tap
     brew install --cask audiocast-driver
 
 Or download the .pkg directly and double-click."
@@ -152,4 +152,4 @@ echo ""
 echo ">> Done."
 echo ">> Release:  https://github.com/${REPO}/releases/tag/${TAG}"
 echo ">> Cask:     https://github.com/${CASK_REPO}/blob/main/Casks/${CASK_SLUG}.rb"
-echo ">> Install:  brew tap jobtools/audiocast && brew install --cask audiocast-driver"
+echo ">> Install:  brew tap jobtools/tap && brew install --cask audiocast-driver"

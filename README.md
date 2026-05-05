@@ -7,7 +7,7 @@ System Settings → Sound shows it as **AudioCast** (not "BlackHole 2ch"). Bundl
 ## Install (recommended: Homebrew)
 
 ```bash
-brew tap jobtools/audiocast
+brew tap jobtools/tap
 brew install --cask audiocast-driver
 ```
 
