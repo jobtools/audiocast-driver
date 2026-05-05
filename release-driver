@@ -8,7 +8,7 @@ INSTALLER_DIR="${PROJECT_ROOT}/Installer"
 VERSION_FILE="${PROJECT_ROOT}/VERSION"
 
 REPO="${REPO:-jobtools/audiocast-driver}"
-CASK_REPO="${CASK_REPO:-jobtools/homebrew-audiocast}"
+CASK_REPO="${CASK_REPO:-jobtools/homebrew-tap}"
 CASK_SLUG="audiocast-driver"
 
 # --- Bump version (last segment +1) ------------------------------------------
