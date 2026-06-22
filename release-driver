@@ -113,7 +113,7 @@ cask "${CASK_SLUG}" do
   desc "Virtual audio device for AudioCast (BlackHole fork with AudioCast branding)"
   homepage "https://github.com/${REPO}"
 
-  depends_on macos: ">= :sonoma"
+  depends_on macos: :sonoma
 
   pkg "AudioCast-#{version}.pkg"
 
