@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 # Build the AudioCast virtual audio driver as a single-variant fork of BlackHole.
-# Outputs Installer/AudioCast-<version>.pkg, signed with the self-signed
-# "AudioCast Dev" identity (no Apple Developer Program required).
+# Outputs Installer/AudioCast-<version>.pkg.
+#
+# Signed with the Developer ID keys when they are in the keychain, which is what
+# ./release-driver ships: the AudioCast app installs this package as root, so a
+# signed and notarized package is the only thing that lets the app refuse
+# anything else. Falls back to the self-signed "AudioCast Dev" identity and an
+# unsigned package for local builds, which is fine for `sudo installer` by hand
+# and nothing else.
 set -euo pipefail
 
 driverName="AudioCast"
@@ -9,9 +15,31 @@ bundleID="com.audiocast.driver"
 manufacturer="AudioCast"
 channels=2
 
-certName="AudioCast Dev"
+devCertName="AudioCast Dev"
 certP12="${AUDIOCAST_CERT_P12:-../AudioCast/sender/macos/certs/AudioCastDev.p12}"
 certPass="${AUDIOCAST_CERT_PASS:-audiocast}"
+
+# SIGN_IDENTITY signs the .driver bundle, INSTALLER_IDENTITY signs the .pkg —
+# two different certificate types, both needed for a release build. Either can
+# be overridden; otherwise they are picked from the keychain.
+if [[ -z "${SIGN_IDENTITY:-}" ]]; then
+    SIGN_IDENTITY="$(security find-identity -v -p codesigning \
+        | sed -n 's/.*"\(Developer ID Application: .*\)"$/\1/p' | head -1)"
+fi
+[[ -n "${SIGN_IDENTITY}" ]] || SIGN_IDENTITY="$devCertName"
+
+if [[ -z "${INSTALLER_IDENTITY:-}" ]]; then
+    INSTALLER_IDENTITY="$(security find-identity -v \
+        | sed -n 's/.*"\(Developer ID Installer: .*\)"$/\1/p' | head -1)"
+fi
+
+# Hardened runtime and a timestamp only make sense for the Developer ID key: the
+# self-signed cert has no chain Apple's timestamp server will vouch for, and the
+# notary service rejects anything signed without the runtime.
+HARDENED=0
+case "${SIGN_IDENTITY}" in
+    "Developer ID Application: "*) HARDENED=1 ;;
+esac
 
 # --- Validation ---------------------------------------------------------------
 if [[ ! -d BlackHole.xcodeproj ]]; then
@@ -25,7 +53,10 @@ if [[ -z "$version" ]]; then
 fi
 
 # --- Ensure cert is in keychain -----------------------------------------------
-if ! security find-identity -v -p codesigning | grep -q "$certName"; then
+# Keyed off the *resolved* identity: asking for the dev cert explicitly on a
+# machine that also holds the Developer ID key has to install it too.
+if [[ "$SIGN_IDENTITY" == "$devCertName" ]] \
+   && ! security find-identity -v -p codesigning | grep -q "$devCertName"; then
     if [[ ! -f "$certP12" ]]; then
         echo "Cert not found at $certP12 — set AUDIOCAST_CERT_P12 to override." >&2
         exit 1
@@ -74,21 +105,38 @@ mv "build/$driverName.driver" "Installer/root/$driverName.driver"
 rm -rf build
 
 # --- Sign .driver -------------------------------------------------------------
-echo ">> Signing $driverName.driver..."
-codesign --force --deep --sign "$certName" "Installer/root/$driverName.driver"
+# No --deep: it is deprecated, and this bundle is a single Mach-O with no nested
+# code for it to reach anyway.
+echo ">> Signing $driverName.driver with: $SIGN_IDENTITY"
+signArgs=(--force --sign "$SIGN_IDENTITY")
+if [[ $HARDENED -eq 1 ]]; then
+    signArgs+=(--timestamp --options runtime)
+fi
+codesign "${signArgs[@]}" "Installer/root/$driverName.driver"
+codesign --verify --strict --verbose=2 "Installer/root/$driverName.driver"
 
 # --- Build .pkg ---------------------------------------------------------------
 chmod 755 Installer/Scripts/preinstall Installer/Scripts/postinstall 2>/dev/null || true
 
 pkgName="$driverName-$version.pkg"
 echo ">> Packaging $pkgName..."
-pkgbuild \
-    --root Installer/root \
-    --scripts Installer/Scripts \
-    --install-location /Library/Audio/Plug-Ins/HAL \
-    --identifier "$bundleID" \
-    --version "$version" \
-    "Installer/$pkgName"
+pkgArgs=(
+    --root Installer/root
+    --scripts Installer/Scripts
+    --install-location /Library/Audio/Plug-Ins/HAL
+    --identifier "$bundleID"
+    --version "$version"
+)
+if [[ -n "${INSTALLER_IDENTITY}" ]]; then
+    echo ">> Signing $pkgName with: $INSTALLER_IDENTITY"
+    pkgArgs+=(--sign "${INSTALLER_IDENTITY}" --timestamp)
+elif [[ $HARDENED -eq 1 ]]; then
+    # A Developer-ID-signed driver inside an unsigned package is a half-measure
+    # that reads as a release build but cannot be notarized. Say so rather than
+    # let it reach ./release-driver, which checks for both up front.
+    echo ">> WARNING: no 'Developer ID Installer' certificate — package will be unsigned." >&2
+fi
+pkgbuild "${pkgArgs[@]}" "Installer/$pkgName"
 
 rm -rf Installer/root
 
