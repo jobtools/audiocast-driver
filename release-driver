@@ -1,7 +1,21 @@
 #!/bin/bash
-# Build the AudioCast driver, publish to GitHub Releases, refresh Homebrew cask.
-# REPO/CASK_REPO env can override the targets.
+# Build the AudioCast driver, notarize it with Apple, publish to GitHub Releases,
+# refresh Homebrew cask. REPO/CASK_REPO env can override the targets.
+#
+# Notarization is mandatory here. The AudioCast app installs this package as
+# root, so a signed and notarized package is what lets the app refuse anything
+# else — and `installer` itself checks nothing. Pass --allow-unsigned to publish
+# an unsigned build instead. See ../audiocast/docs/notarization.md for the
+# one-time account setup; the notarytool credentials are shared with the sender.
 set -euo pipefail
+
+NOTARIZE=1
+for arg in "$@"; do
+    case "$arg" in
+        --allow-unsigned) NOTARIZE=0 ;;
+        *) echo "Unknown arg: $arg" >&2; exit 1 ;;
+    esac
+done
 
 PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
 INSTALLER_DIR="${PROJECT_ROOT}/Installer"
@@ -10,6 +24,43 @@ VERSION_FILE="${PROJECT_ROOT}/VERSION"
 REPO="${REPO:-jobtools/audiocast-driver}"
 CASK_REPO="${CASK_REPO:-jobtools/homebrew-tap}"
 CASK_SLUG="audiocast-driver"
+
+# --- Preflight ----------------------------------------------------------------
+# Everything that can fail is checked before the version bump, because the bump
+# is committed: discovering a missing certificate afterwards leaves the repo a
+# version ahead with nothing published, and the retry burns another number.
+if [[ $NOTARIZE -eq 1 ]]; then
+    APP_ID="$(security find-identity -v -p codesigning \
+        | sed -n 's/.*"\(Developer ID Application: .*\)"$/\1/p' | head -1)"
+    PKG_ID_CERT="$(security find-identity -v \
+        | sed -n 's/.*"\(Developer ID Installer: .*\)"$/\1/p' | head -1)"
+    for pair in "Developer ID Application:${APP_ID}" "Developer ID Installer:${PKG_ID_CERT}"; do
+        kind="${pair%%:*}"; value="${pair#*:}"
+        if [[ -z "${value}" ]]; then
+            echo "No \"${kind}\" certificate in the login keychain." >&2
+            echo "Create one at https://developer.apple.com/account/resources/certificates" >&2
+            echo "(or Xcode → Settings → Accounts → Manage Certificates), or re-run with" >&2
+            echo "--allow-unsigned. Only the Account Holder can create Developer ID certs." >&2
+            exit 1
+        fi
+    done
+    # The driver and the package it ships in must come from the same team, or
+    # the notary service rejects the pair.
+    APP_TEAM="${APP_ID##*\(}"; APP_TEAM="${APP_TEAM%\)}"
+    PKG_TEAM="${PKG_ID_CERT##*\(}"; PKG_TEAM="${PKG_TEAM%\)}"
+    if [[ "${APP_TEAM}" != "${PKG_TEAM}" ]]; then
+        echo "Team ID mismatch: driver cert is ${APP_TEAM}, installer cert is ${PKG_TEAM}." >&2
+        exit 1
+    fi
+    NOTARY_PROFILE="${AC_NOTARY_PROFILE:-audiocast}"
+    if ! xcrun notarytool history --keychain-profile "${NOTARY_PROFILE}" >/dev/null 2>&1; then
+        echo "Could not authenticate to the notary service with keychain profile" >&2
+        echo "'${NOTARY_PROFILE}'. Store credentials with 'xcrun notarytool store-credentials'," >&2
+        echo "or re-run with --allow-unsigned. See ../audiocast/docs/notarization.md." >&2
+        exit 1
+    fi
+    echo ">> Preflight OK (team ${APP_TEAM}, notary profile '${NOTARY_PROFILE}')"
+fi
 
 # --- Bump version (last segment +1) ------------------------------------------
 CURRENT="$(cat "${VERSION_FILE}")"
@@ -48,6 +99,24 @@ echo ""
 if [[ ! -f "${PKG_PATH}" ]]; then
     echo "Build did not produce ${PKG_PATH}" >&2
     exit 1
+fi
+
+# --- Notarize + staple --------------------------------------------------------
+# Before the checksum is taken: stapling rewrites the package, so hashing first
+# would publish a cask that rejects the file it points at.
+if [[ $NOTARIZE -eq 1 ]]; then
+    echo ">> Notarizing ${PKG_NAME}..."
+    if ! xcrun notarytool submit "${PKG_PATH}" \
+            --keychain-profile "${NOTARY_PROFILE}" --wait; then
+        echo "Notarization failed, and v${VERSION} is already committed." >&2
+        echo "Fix the cause, then re-run — the bump only happens once per run," >&2
+        echo "so expect the next attempt to land on the following version." >&2
+        exit 1
+    fi
+    xcrun stapler staple "${PKG_PATH}"
+    xcrun stapler validate "${PKG_PATH}"
+    echo ">> Gatekeeper assessment"
+    spctl --assess --type install --verbose=4 "${PKG_PATH}"
 fi
 
 PKG_SHA="$(shasum -a 256 "${PKG_PATH}" | awk '{print $1}')"
@@ -103,6 +172,17 @@ git clone --quiet "git@github.com:${CASK_REPO}.git" "${CASK_DIR}" 2>/dev/null ||
 }
 cd "${CASK_DIR}"
 mkdir -p Casks
+
+# Nothing about signing reaches users on a notarized build — it installs without
+# them doing anything, and how that is achieved is not their problem. The
+# unsigned build does need them to know.
+if [[ $NOTARIZE -eq 1 ]]; then
+    CASK_SIGNING_CAVEAT=""
+else
+    CASK_SIGNING_CAVEAT='    AudioCast Driver is self-signed (not Apple-notarized).
+
+'
+fi
 cat > "Casks/${CASK_SLUG}.rb" <<EOF
 cask "${CASK_SLUG}" do
   version "${VERSION}"
@@ -120,9 +200,7 @@ cask "${CASK_SLUG}" do
   uninstall pkgutil: "com.audiocast.driver"
 
   caveats <<~CAVEATS
-    AudioCast Driver is self-signed (not Apple-notarized).
-
-    After install, restart your Mac or run:
+${CASK_SIGNING_CAVEAT}    After install, restart your Mac or run:
         sudo killall coreaudiod
 
     Then check System Settings → Sound — you should see 'AudioCast' as
